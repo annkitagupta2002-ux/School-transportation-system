@@ -16,6 +16,10 @@ The root contains shared npm tooling and scripts.
 
 The frontend runs at [http://localhost:3000](http://localhost:3000); the Express API runs on port 4001. The frontend proxies `/api/*` to Express.
 
+## Deploy the frontend to Vercel
+
+In the Vercel project settings, set **Root Directory** to `frontend`. Keep the Next.js framework preset, use the default install command, and use `npm run build` as the build command (or leave Vercel's detected `next build` command). Leave **Output Directory** at the Next.js default `.next`. Set `API_ORIGIN` in the Vercel environment variables to the public URL of the separately deployed Express API; the local default is only for development.
+
 School admins can add students, create routes and stops, and broadcast announcements. Drivers can view transport data and update trip status. Parents can register and submit student information; their list is scoped to records submitted by their account.
 
 Never commit the real `.env` file or put database credentials in frontend code. `.env.example` is a safe template.
