@@ -1,8 +1,14 @@
 import type { NextConfig } from "next";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const apiOrigin = process.env.API_ORIGIN || "http://localhost:4001";
+const frontendRoot = path.dirname(fileURLToPath(import.meta.url));
+const turbopackRoot = path.resolve(process.cwd()) === frontendRoot ? frontendRoot : path.dirname(frontendRoot);
 
 const nextConfig: NextConfig = {
   async rewrites() {
-    return { beforeFiles: [{ source: "/api/:path*", destination: "http://localhost:4001/api/:path*" }] };
+    return { beforeFiles: [{ source: "/api/:path*", destination: `${apiOrigin}/api/:path*` }] };
   },
   /* config options here */
   experimental: {
@@ -11,6 +17,7 @@ const nextConfig: NextConfig = {
   cacheComponents: true,
   partialPrefetching: true,
   turbopack: {
+    root: turbopackRoot,
     rules: {
       "*.css": {
         loaders: ["@tailwindcss/turbopack"],
