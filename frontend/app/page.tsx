@@ -9,8 +9,10 @@ import type {
   NotificationItem,
   ActivityEvent,
 } from "@/lib/data-store";
+import { readApiJson } from "@/lib/api-response";
 
 type Tab = "overview" | "live" | "routes" | "students" | "notifications";
+type DriverAccount = { id: string; name: string; email: string; isActive: boolean; routes: { id: string; number: string }[] };
 
 function Icon({ name, size = 18 }: { name: string; size?: number }) {
   const common = {
@@ -112,15 +114,40 @@ function Icon({ name, size = 18 }: { name: string; size?: number }) {
   return <svg {...common}>{paths[name] ?? paths.pin}</svg>;
 }
 
+function formatNotificationAge(createdAt: string | undefined, fallbackTime: string, now: Date | null) {
+  if (!createdAt) return fallbackTime;
+  const created = new Date(createdAt);
+  if (Number.isNaN(created.getTime())) return fallbackTime;
+  const elapsedMinutes = Math.max(0, Math.floor(((now?.getTime() ?? Date.now()) - created.getTime()) / 60_000));
+  const age = elapsedMinutes < 1
+    ? "just now"
+    : elapsedMinutes < 60
+      ? `${elapsedMinutes}m ago`
+      : elapsedMinutes < 24 * 60
+        ? `${Math.floor(elapsedMinutes / 60)}h ago`
+        : `${Math.floor(elapsedMinutes / (24 * 60))}d ago`;
+  const time = created.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  return `${time} · ${age}`;
+}
+
 export default function Home() {
   const [activeTab, setActiveTab] = useState<Tab>("overview");
   const [role, setRole] = useState("School admin");
   const [token, setToken] = useState("");
   const [authChecking, setAuthChecking] = useState(true);
-  const [authUser, setAuthUser] = useState<{ id: string; name: string; role: string } | null>(null);
+  const [authSubmitting, setAuthSubmitting] = useState(false);
+  const [pendingRequests, setPendingRequests] = useState(0);
+  const [authUser, setAuthUser] = useState<{ id: string; name: string; email: string; role: string } | null>(null);
   const [authError, setAuthError] = useState("");
   const [registerParent, setRegisterParent] = useState(false);
-  const [selectedRouteId, setSelectedRouteId] = useState("RTE-008");
+  const [currentDateTime, setCurrentDateTime] = useState<Date | null>(null);
+  const [drivers, setDrivers] = useState<DriverAccount[]>([]);
+  const [showDriversModal, setShowDriversModal] = useState(false);
+  const [editingDriver, setEditingDriver] = useState<DriverAccount | null>(null);
+  const [driverFormError, setDriverFormError] = useState("");
+  const [driverFormSuccess, setDriverFormSuccess] = useState("");
+  const [showProfileModal, setShowProfileModal] = useState(false);
+  const [selectedRouteId, setSelectedRouteId] = useState("");
   const [routes, setRoutes] = useState<RouteItem[]>([]);
   const [students, setStudents] = useState<Student[]>([]);
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
@@ -129,41 +156,149 @@ export default function Home() {
   const [notice, setNotice] = useState("");
 
   useEffect(() => {
+    const updateClock = () => setCurrentDateTime(new Date());
+    updateClock();
+    const intervalId = window.setInterval(updateClock, 30_000);
+    return () => window.clearInterval(intervalId);
+  }, []);
+
+  useEffect(() => {
     const saved = localStorage.getItem("waypoint-token");
-    if (saved) {
-      fetch("/api/auth/me", { headers: { Authorization: `Bearer ${saved}` } })
-        .then((r) => r.ok ? r.json() : Promise.reject())
-        .then((data) => { setToken(saved); setAuthUser(data.user); setRole(data.user.role === "SCHOOL_ADMIN" ? "School admin" : data.user.role === "DRIVER" ? "Driver" : "Parent"); })
-        .catch(() => { localStorage.removeItem("waypoint-token"); setToken(""); })
-        .finally(() => setAuthChecking(false));
-    } else queueMicrotask(() => setAuthChecking(false));
+    const headers = new Headers();
+    if (saved) headers.set("Authorization", `Bearer ${saved}`);
+    fetch("/api/auth/me", { headers, credentials: "include" })
+      .then(async (r) => { if (!r.ok) throw new Error("No active session."); return readApiJson<{ user: { id: string; name: string; email: string; role: string } }>(r); })
+      .then((data) => {
+        setToken("authenticated");
+        setAuthUser(data.user);
+        const nextRole = data.user.role === "SCHOOL_ADMIN" ? "School admin" : data.user.role === "DRIVER" ? "Driver" : "Parent";
+        setRole(nextRole);
+        if (nextRole === "Parent") setActiveTab("live");
+        localStorage.removeItem("waypoint-token");
+      })
+      .catch(() => { localStorage.removeItem("waypoint-token"); setToken(""); })
+      .finally(() => setAuthChecking(false));
   }, []);
 
   const apiFetch = useCallback(async (input: RequestInfo | URL, init: RequestInit = {}) => {
     const headers = new Headers(init.headers);
-    if (token) headers.set("Authorization", `Bearer ${token}`);
     if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-    return fetch(input, { ...init, headers });
-  }, [token]);
+    setPendingRequests((count) => count + 1);
+    try { return await fetch(input, { cache: "no-store", ...init, headers, credentials: "include" }); }
+    finally { setPendingRequests((count) => Math.max(0, count - 1)); }
+  }, []);
+
+  const loadDrivers = useCallback(async () => {
+    const response = await apiFetch("/api/drivers");
+    const data = await readApiJson<{ drivers?: DriverAccount[]; error?: string }>(response);
+    if (!response.ok) throw new Error(data.error || "Could not load driver accounts.");
+    const nextDrivers = Array.isArray(data.drivers) ? data.drivers : [];
+    setDrivers(nextDrivers);
+    return nextDrivers;
+  }, [apiFetch]);
+
+  function flashNotice(msg: string) {
+    setNotice(msg);
+    window.setTimeout(() => setNotice(""), 3500);
+  }
 
   async function handleAuthSubmit(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault(); setAuthError("");
+    e.preventDefault(); setAuthError(""); setAuthSubmitting(true);
     const values = Object.fromEntries(new FormData(e.currentTarget).entries());
     const endpoint = registerParent ? "/api/auth/register-parent" : "/api/auth/login";
     try {
-      const response = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values) });
-      const data = await response.json();
+      const response = await fetch(endpoint, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values) });
+      const data = await readApiJson<{ error?: string; user: { id: string; name: string; email: string; role: string } }>(response);
       if (!response.ok) throw new Error(data.error || "Could not sign in.");
-      localStorage.setItem("waypoint-token", data.token); setToken(data.token); setAuthUser(data.user);
-      setRole(data.user.role === "SCHOOL_ADMIN" ? "School admin" : data.user.role === "DRIVER" ? "Driver" : "Parent");
+      localStorage.removeItem("waypoint-token"); setToken("authenticated"); setAuthUser(data.user);
+      const nextRole = data.user.role === "SCHOOL_ADMIN" ? "School admin" : data.user.role === "DRIVER" ? "Driver" : "Parent";
+      setRole(nextRole);
+      if (nextRole === "Parent") setActiveTab("live");
     } catch (err) { setAuthError(err instanceof Error ? err.message : "Could not sign in."); }
+    finally { setAuthSubmitting(false); }
+  }
+
+  async function handleDriverSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setDriverFormError("");
+    setDriverFormSuccess("");
+    const form = e.currentTarget;
+    const values = Object.fromEntries(new FormData(form).entries());
+    const payload = { ...values, isActive: values.isActive === "on", routeId: values.routeId || "" };
+    try {
+      const response = await apiFetch(editingDriver ? `/api/drivers/${editingDriver.id}` : "/api/drivers", {
+        method: editingDriver ? "PATCH" : "POST",
+        body: JSON.stringify(payload),
+      });
+      const data = await readApiJson<{ error?: string; driver?: { id: string; name: string; email: string; isActive: boolean } }>(response);
+      if (!response.ok) throw new Error(data.error || "Could not save driver account.");
+      if (!data.driver) throw new Error("The server did not confirm the saved driver account.");
+      const savedDriver = { ...data.driver, routes: editingDriver?.routes || [] };
+      setDrivers((current) => editingDriver
+        ? current.map((driver) => driver.id === savedDriver.id ? { ...driver, ...savedDriver } : driver)
+        : [...current.filter((driver) => driver.id !== savedDriver.id), savedDriver]);
+      let listRefreshError = "";
+      try {
+        await loadDrivers();
+      } catch {
+        listRefreshError = "The account was saved, but the driver list could not refresh. Reopen this form to retry.";
+      }
+      setEditingDriver(null);
+      form.reset();
+      if (listRefreshError) setDriverFormError(listRefreshError);
+      else setDriverFormSuccess(`Driver account saved for ${savedDriver.email}. Sign in using this email and the password entered above.`);
+    } catch (err) {
+      setDriverFormError(err instanceof Error ? err.message : "Could not save driver account.");
+    }
+  }
+
+  async function handleDeactivateDriver(driver: DriverAccount) {
+    if (!window.confirm(`Deactivate ${driver.name}'s account? They will no longer be able to sign in.`)) return;
+    try {
+      const response = await apiFetch(`/api/drivers/${driver.id}`, { method: "DELETE" });
+      const data = await readApiJson<{ error?: string }>(response);
+      if (!response.ok) throw new Error(data.error || "Could not deactivate driver.");
+      await loadDrivers();
+      flashNotice("Driver account deactivated");
+    } catch (err) { flashNotice(err instanceof Error ? err.message : "Could not deactivate driver."); }
+  }
+
+  async function handleSignOut() {
+    try { await apiFetch("/api/auth/logout", { method: "POST" }); } catch { /* Clear the local session even if the API is offline. */ }
+    localStorage.removeItem("waypoint-token");
+    setToken(""); setAuthUser(null); setRole("School admin");
+  }
+
+  async function handleProfileSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const values = Object.fromEntries(new FormData(e.currentTarget).entries());
+    try {
+      const response = await apiFetch("/api/auth/me", { method: "PATCH", body: JSON.stringify(values) });
+      const data = await readApiJson<{ user?: { id: string; name: string; email: string; role: string }; error?: string }>(response);
+      if (!response.ok || !data.user) throw new Error(data.error || "Could not update your profile.");
+      setAuthUser(data.user);
+      setShowProfileModal(false);
+      flashNotice("Profile updated");
+    } catch (err) { flashNotice(err instanceof Error ? err.message : "Could not update your profile."); }
+  }
+
+  async function handleReactivateDriver(driver: DriverAccount) {
+    try {
+      const response = await apiFetch(`/api/drivers/${driver.id}`, { method: "PATCH", body: JSON.stringify({ isActive: true }) });
+      const data = await readApiJson<{ error?: string }>(response);
+      if (!response.ok) throw new Error(data.error || "Could not reactivate driver.");
+      await loadDrivers();
+      flashNotice("Driver account reactivated");
+    } catch (err) { flashNotice(err instanceof Error ? err.message : "Could not reactivate driver."); }
   }
 
   // Modals state
   const [showDelayModal, setShowDelayModal] = useState(false);
   const [showAddStopModal, setShowAddStopModal] = useState(false);
   const [showAddRouteModal, setShowAddRouteModal] = useState(false);
+  const [editingRoute, setEditingRoute] = useState<RouteItem | null>(null);
   const [showAddStudentModal, setShowAddStudentModal] = useState(false);
+  const [editingStudent, setEditingStudent] = useState<Student | null>(null);
   const [showBroadcastModal, setShowBroadcastModal] = useState(false);
   const [activeContactStudent, setActiveContactStudent] = useState<Student | null>(null);
 
@@ -178,8 +313,11 @@ export default function Home() {
     try {
       const res = await apiFetch(`/api/route?routeId=${selectedRouteId}`);
       if (!res.ok) throw new Error("Could not load transportation data.");
-      const data = await res.json();
-      if (Array.isArray(data.routes)) setRoutes(data.routes);
+      const data = await readApiJson<{ routes?: RouteItem[]; students?: Student[]; notifications?: NotificationItem[]; activity?: ActivityEvent[]; unreadNotificationsCount?: number }>(res);
+      if (Array.isArray(data.routes)) {
+        setRoutes(data.routes);
+        if (data.routes.length && !data.routes.some((route) => route.id === selectedRouteId)) setSelectedRouteId(data.routes[0].id);
+      }
       if (Array.isArray(data.students)) setStudents(data.students);
       if (Array.isArray(data.notifications)) setNotifications(data.notifications);
       if (Array.isArray(data.activity)) setActivity(data.activity);
@@ -195,11 +333,14 @@ export default function Home() {
   useEffect(() => {
     let isMounted = true;
     if (!token) return;
-    apiFetch(`/api/route?routeId=${selectedRouteId}`)
-      .then((res) => res.json())
+    const loadTransportationData = () => apiFetch(`/api/route?routeId=${selectedRouteId}`)
+      .then((res) => { if (!res.ok) throw new Error("Could not load transportation data."); return readApiJson<{ routes?: RouteItem[]; students?: Student[]; notifications?: NotificationItem[]; activity?: ActivityEvent[]; unreadNotificationsCount?: number }>(res); })
       .then((data) => {
         if (!isMounted) return;
-        if (Array.isArray(data.routes)) setRoutes(data.routes);
+        if (Array.isArray(data.routes)) {
+          setRoutes(data.routes);
+          if (data.routes.length && !data.routes.some((route) => route.id === selectedRouteId)) setSelectedRouteId(data.routes[0].id);
+        }
         if (Array.isArray(data.students)) setStudents(data.students);
         if (Array.isArray(data.notifications)) setNotifications(data.notifications);
         if (Array.isArray(data.activity)) setActivity(data.activity);
@@ -212,28 +353,32 @@ export default function Home() {
           setNotice(err instanceof Error ? err.message : "Error connecting to transport service.");
         }
       });
+    queueMicrotask(loadTransportationData);
     return () => {
       isMounted = false;
     };
   }, [selectedRouteId, token, apiFetch]);
 
-  const currentRoute = routes.find((r) => r.id === selectedRouteId) || routes[0] || {
-    id: "RTE-008",
-    number: "Route 08",
-    campus: "North Campus",
-    status: "On the way" as RouteStatus,
-    driver: { name: "Amit Singh", phone: "+91 98765 01008", avatar: "AS", verified: true },
-    vehicle: { reg: "KA 05 MN 2048", model: "School bus", capacity: 32, inspectionStatus: "Passed" as const },
-    eta: "8:10 AM · 17 min",
-    currentStopIndex: 2,
-    stops: [],
-  };
+  useEffect(() => {
+    if (!token || role !== "School admin") return;
+    let isMounted = true;
+    const loadDrivers = () => apiFetch("/api/drivers")
+      .then(async (response) => {
+        const data = await readApiJson<{ drivers?: DriverAccount[]; error?: string }>(response);
+        if (!response.ok) throw new Error(data.error || "Could not load driver accounts.");
+        if (isMounted) setDrivers(Array.isArray(data.drivers) ? data.drivers : []);
+      })
+      .catch((err) => { if (isMounted) setNotice(err instanceof Error ? err.message : "Could not load driver accounts."); });
+    queueMicrotask(loadDrivers);
+    return () => { isMounted = false; };
+  }, [token, role, apiFetch]);
 
-  // Helper notice toaster
-  function flashNotice(msg: string) {
-    setNotice(msg);
-    window.setTimeout(() => setNotice(""), 3500);
-  }
+  const currentRoute = routes.find((r) => r.id === selectedRouteId) || routes[0] || {
+    id: "", number: "No route selected", campus: "", status: "Scheduled" as RouteStatus,
+    driver: { name: "", phone: "", avatar: "", verified: false },
+    vehicle: { reg: "", model: "", capacity: 0, inspectionStatus: "Pending" as const },
+    eta: "", currentStopIndex: 0, stops: [],
+  };
 
   // Action: update route status
   async function handleUpdateStatus(next: RouteStatus, reason?: string, delayMinutes?: string) {
@@ -248,7 +393,7 @@ export default function Home() {
           delayMinutes,
         }),
       });
-      const data = await res.json();
+      const data = await readApiJson<{ error?: string; route?: RouteItem }>(res);
       if (!res.ok) throw new Error(data.error || "Failed to update route.");
       await loadData();
       flashNotice(`${currentRoute.number} status set to "${next}" · shared with families`);
@@ -269,7 +414,7 @@ export default function Home() {
           pickedUp: studentName,
         }),
       });
-      const data = await res.json();
+      const data = await readApiJson<{ error?: string; route?: RouteItem }>(res);
       if (!res.ok) throw new Error(data.error || "Failed to record pickup.");
       await loadData();
       flashNotice(`${studentName} marked as picked up · family notified`);
@@ -286,7 +431,7 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ studentId, status }),
       });
-      const data = await res.json();
+      const data = await readApiJson<{ error?: string; route?: RouteItem }>(res);
       if (!res.ok) throw new Error(data.error || "Failed to update student.");
       await loadData();
       flashNotice(`Student status updated to ${status}`);
@@ -303,7 +448,7 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ routeId, action: "advance_stop" }),
       });
-      const data = await res.json();
+      const data = await readApiJson<{ error?: string; route?: RouteItem }>(res);
       if (!res.ok) throw new Error(data.error || "Failed to advance route.");
       await loadData();
       flashNotice("Bus progressed to the next stop · live ETAs updated");
@@ -320,13 +465,36 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "mark_read", id }),
       });
-      const data = await res.json();
+      const data = await readApiJson<{ error?: string; route?: RouteItem }>(res);
       if (!res.ok) throw new Error(data.error || "Failed to mark notifications.");
       await loadData();
       flashNotice("Notifications updated");
     } catch (err) {
       flashNotice(err instanceof Error ? err.message : "Error updating notifications.");
     }
+  }
+
+  async function handleDeleteNotification(id: string) {
+    if (!window.confirm("Delete this broadcast for everyone?")) return;
+    try {
+      const response = await apiFetch(`/api/notifications/${encodeURIComponent(id)}`, { method: "DELETE" });
+      const data = await readApiJson<{ error?: string }>(response);
+      if (!response.ok) throw new Error(data.error || "Could not delete broadcast.");
+      await loadData();
+      flashNotice("Broadcast deleted");
+    } catch (err) {
+      flashNotice(err instanceof Error ? err.message : "Could not delete broadcast.");
+    }
+  }
+
+  async function handleNotifyDriver(student: Student) {
+    try {
+      const response = await apiFetch("/api/notifications", { method: "POST", body: JSON.stringify({ action: "notify_driver", studentId: student.id }) });
+      const data = await readApiJson<{ error?: string }>(response);
+      if (!response.ok) throw new Error(data.error || "Could not notify the assigned driver.");
+      await loadData();
+      flashNotice("Pickup message sent to the assigned driver");
+    } catch (err) { flashNotice(err instanceof Error ? err.message : "Could not notify the assigned driver."); }
   }
 
   // Action: Add new stop
@@ -344,12 +512,12 @@ export default function Home() {
     };
 
     try {
-      const res = await apiFetch("/api/routes", {
-        method: "POST",
+      const res = await apiFetch(editingRoute ? `/api/routes/${editingRoute.id}` : "/api/routes", {
+        method: editingRoute ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      const data = await res.json();
+      const data = await readApiJson<{ error?: string; route?: RouteItem }>(res);
       if (!res.ok) throw new Error(data.error || "Could not add stop.");
       await loadData();
       setShowAddStopModal(false);
@@ -369,6 +537,7 @@ export default function Home() {
       campus: formData.get("campus"),
       driverName: formData.get("driverName"),
       driverPhone: formData.get("driverPhone"),
+      driverId: formData.get("driverId"),
       vehicleReg: formData.get("vehicleReg"),
       vehicleModel: formData.get("vehicleModel"),
       capacity: formData.get("capacity"),
@@ -380,15 +549,56 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      const data = await res.json();
+      const data = await readApiJson<{ error?: string; route?: RouteItem }>(res);
       if (!res.ok) throw new Error(data.error || "Could not create route.");
       await loadData();
+      await loadDrivers().catch(() => undefined);
       setShowAddRouteModal(false);
       if (data.route?.id) setSelectedRouteId(data.route.id);
-      flashNotice(`New route "${body.number}" created successfully`);
+      setEditingRoute(null);
+      flashNotice(editingRoute ? `Route "${body.number}" updated` : `New route "${body.number}" created successfully`);
     } catch (err) {
       flashNotice(err instanceof Error ? err.message : "Error creating route.");
     }
+  }
+
+  async function handleDeleteRoute(route: RouteItem) {
+    if (!window.confirm(`Delete ${route.number}? Routes with assigned students must be reassigned first.`)) return;
+    try {
+      const response = await apiFetch(`/api/routes/${route.id}`, { method: "DELETE" });
+      const data = await readApiJson<{ error?: string }>(response);
+      if (!response.ok) throw new Error(data.error || "Could not delete route.");
+      await loadData();
+      setSelectedRouteId("");
+      flashNotice(`${route.number} deleted`);
+    } catch (err) { flashNotice(err instanceof Error ? err.message : "Could not delete route."); }
+  }
+
+  async function handleEditStop(stop: RouteItem["stops"][number]) {
+    const name = window.prompt("Stop name", stop.name);
+    if (name === null) return;
+    const area = window.prompt("Landmark / area", stop.area);
+    if (area === null) return;
+    const time = window.prompt("Scheduled time", stop.time);
+    if (time === null) return;
+    try {
+      const response = await apiFetch(`/api/stops/${encodeURIComponent(stop.id)}`, { method: "PATCH", body: JSON.stringify({ routeId: currentRoute.id, name, area, time, student: stop.student }) });
+      const data = await readApiJson<{ error?: string }>(response);
+      if (!response.ok) throw new Error(data.error || "Could not update stop.");
+      await loadData();
+      flashNotice("Stop updated");
+    } catch (err) { flashNotice(err instanceof Error ? err.message : "Could not update stop."); }
+  }
+
+  async function handleDeleteStop(stop: RouteItem["stops"][number]) {
+    if (!window.confirm(`Remove ${stop.name} from ${currentRoute.number}?`)) return;
+    try {
+      const response = await apiFetch(`/api/stops/${encodeURIComponent(stop.id)}?routeId=${encodeURIComponent(currentRoute.id)}`, { method: "DELETE" });
+      const data = await readApiJson<{ error?: string }>(response);
+      if (!response.ok) throw new Error(data.error || "Could not remove stop.");
+      await loadData();
+      flashNotice("Stop removed");
+    } catch (err) { flashNotice(err instanceof Error ? err.message : "Could not remove stop."); }
   }
 
   // Action: Add new student
@@ -409,19 +619,31 @@ export default function Home() {
     };
 
     try {
-      const res = await apiFetch("/api/students", {
-        method: "POST",
+      const res = await apiFetch(editingStudent ? `/api/students/${editingStudent.id}` : "/api/students", {
+        method: editingStudent ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      const data = await res.json();
+      const data = await readApiJson<{ error?: string; route?: RouteItem }>(res);
       if (!res.ok) throw new Error(data.error || "Could not register student.");
       await loadData();
       setShowAddStudentModal(false);
-      flashNotice(`Student "${body.name}" registered and assigned to ${body.routeId}`);
+      setEditingStudent(null);
+      flashNotice(editingStudent ? `Student "${body.name}" updated` : `Student "${body.name}" registered and assigned to ${body.routeId}`);
     } catch (err) {
       flashNotice(err instanceof Error ? err.message : "Error registering student.");
     }
+  }
+
+  async function handleDeleteStudent(student: Student) {
+    if (!window.confirm(`Delete ${student.name}'s record? This removes the student record but keeps the parent account.`)) return;
+    try {
+      const response = await apiFetch(`/api/students/${student.id}`, { method: "DELETE" });
+      const data = await readApiJson<{ error?: string }>(response);
+      if (!response.ok) throw new Error(data.error || "Could not delete student.");
+      await loadData();
+      flashNotice(`Student ${student.name} removed`);
+    } catch (err) { flashNotice(err instanceof Error ? err.message : "Could not delete student."); }
   }
 
   // Action: Broadcast announcement
@@ -444,7 +666,7 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      const data = await res.json();
+      const data = await readApiJson<{ error?: string; route?: RouteItem }>(res);
       if (!res.ok) throw new Error(data.error || "Could not broadcast alert.");
       await loadData();
       setShowBroadcastModal(false);
@@ -474,7 +696,8 @@ export default function Home() {
   });
 
   // Overview operational metrics
-  const totalStudents = students.length || 12;
+  const totalStudents = students.length;
+  const parentStudent = role === "Parent" ? students[0] : undefined;
   const pickedUpCount = students.filter((s) => s.status === "Picked up").length;
   const waitingCount = students.filter((s) => s.status === "Waiting").length;
   const activeRoutesCount = routes.filter((r) => r.status === "On the way" || r.status === "At stop").length;
@@ -488,12 +711,12 @@ export default function Home() {
           <div className="brand-mark" style={{ marginBottom: 18 }}><Icon name="route" size={22} /></div>
           <div className="section-kicker">WAYPOINT · SCHOOL TRANSPORT</div>
           <h2>{registerParent ? "Create parent account" : "Sign in to Waypoint"}</h2>
-          <p>{registerParent ? "Register to submit your student’s transport details." : "Use your school or driver account to continue."}</p>
+          <p>{registerParent ? "Register to submit your student’s transport details." : "Sign in with your school, driver, or parent account."}</p>
           {registerParent && <div className="form-field"><label className="form-label">Full name</label><input name="name" required className="form-input" autoComplete="name" /></div>}
           <div className="form-field" style={{ marginBottom: 12 }}><label className="form-label">Email</label><input name="email" type="email" required className="form-input" autoComplete="username" /></div>
           <div className="form-field"><label className="form-label">Password</label><input name="password" type="password" required minLength={registerParent ? 10 : undefined} className="form-input" autoComplete={registerParent ? "new-password" : "current-password"} /></div>
           {authError && <p role="alert" style={{ color: "#be123c", margin: "12px 0 0" }}>{authError}</p>}
-          <button className="action-primary-btn" style={{ width: "100%", justifyContent: "center", marginTop: 18 }}>{registerParent ? "Create parent account" : "Sign in"}</button>
+          <button className="action-primary-btn" disabled={authSubmitting} aria-busy={authSubmitting} style={{ width: "100%", justifyContent: "center", marginTop: 18 }}>{authSubmitting ? "Please wait…" : registerParent ? "Create parent account" : "Sign in"}</button>
           <button type="button" className="action-secondary-btn" style={{ width: "100%", justifyContent: "center", marginTop: 10 }} onClick={() => { setRegisterParent(!registerParent); setAuthError(""); }}>
             {registerParent ? "Back to sign in" : "Register as a parent"}
           </button>
@@ -512,7 +735,7 @@ export default function Home() {
         </a>
         <div className="school-switch">
           <div className="school-avatar">P</div>
-          <div className="school-copy">
+            <div className="school-copy">
             <strong>Pinecrest School</strong>
             <span>North Campus</span>
           </div>
@@ -530,19 +753,19 @@ export default function Home() {
             className={`nav-item ${activeTab === "live" ? "active" : ""}`}
             onClick={() => setActiveTab("live")}
           >
-            <Icon name="bus" /> Live routes <span className="nav-count">{activeRoutesCount || 3}</span>
+            <Icon name="bus" /> Live routes <span className="nav-count">{activeRoutesCount}</span>
           </button>
-          <button
+          {role !== "Parent" && <button
             className={`nav-item ${activeTab === "routes" ? "active" : ""}`}
             onClick={() => setActiveTab("routes")}
           >
             <Icon name="pin" /> Stops & routes
-          </button>
+          </button>}
           <button
             className={`nav-item ${activeTab === "students" ? "active" : ""}`}
             onClick={() => setActiveTab("students")}
           >
-            <Icon name="users" /> Students <span className="nav-count">{students.length || 12}</span>
+            <Icon name="users" /> Students <span className="nav-count">{students.length}</span>
           </button>
           <button
             className={`nav-item ${activeTab === "notifications" ? "active" : ""}`}
@@ -569,12 +792,12 @@ export default function Home() {
             </button>
           </div>
           <div className="profile-row">
-            <div className="profile-avatar">RK</div>
+            <div className="profile-avatar">{authUser.name.slice(0, 2).toUpperCase()}</div>
             <div className="profile-copy">
-              <strong>Riya Khanna</strong>
-              <span>Transport coordinator</span>
+              <strong>{authUser.name}</strong>
+              <span>{role}</span>
             </div>
-            <button className="icon-button" aria-label="More profile options"><Icon name="more" /></button>
+            <button className="icon-button" aria-label="Edit profile" onClick={() => setShowProfileModal(true)}><Icon name="more" /></button>
           </div>
         </div>
       </aside>
@@ -594,7 +817,9 @@ export default function Home() {
             </strong>
           </div>
           <div className="top-actions">
-            <span className="today-label">Friday, 20 November</span>
+            <time className="today-label" suppressHydrationWarning>
+              {currentDateTime?.toLocaleString(undefined, { weekday: "long", day: "numeric", month: "long", hour: "numeric", minute: "2-digit" }) ?? ""}
+            </time>
             <button
               className="top-icon"
               aria-label="Notifications"
@@ -616,11 +841,11 @@ export default function Home() {
                 <span className="live-pulse" /> LIVE TRANSPORT SYSTEM
               </div>
               <h1>
-                Good morning, Riya <span className="wave">✳</span>
+                {role === "Parent" ? "Parent Dashboard" : `Welcome, ${authUser.name}`} <span className="wave">✳</span>
               </h1>
               <p>
                 {activeTab === "overview" && "Fleet monitoring, student boarding status, and route coordination."}
-                {activeTab === "live" && "Real-time bus tracking, driver stop updates, and family notifications."}
+                {activeTab === "live" && (role === "Parent" ? "Your student’s route and transport updates." : "Real-time bus tracking, driver stop updates, and family notifications.")}
                 {activeTab === "routes" && "Manage school bus routes, scheduled stop timings, and pickup locations."}
                 {activeTab === "students" && "Registered students, bus assignments, and guardian contacts."}
                 {activeTab === "notifications" && "Real-time delay alerts, safety notices, and school announcements."}
@@ -628,6 +853,10 @@ export default function Home() {
             </div>
             <div className="heading-actions">
               <span className="role-switch">{authUser.name} · {role}</span>
+              {pendingRequests > 0 && <span role="status" aria-live="polite" style={{ fontSize: 11, color: "var(--text-muted)" }}>Syncing with database…</span>}
+            {role === "School admin" && <button className="outline-button" onClick={() => { setEditingDriver(null); setDriverFormError(""); setDriverFormSuccess(""); setShowDriversModal(true); }}>
+                <Icon name="users" size={15} /> Manage drivers
+              </button>}
               {role === "School admin" && <button
                 className="outline-button"
                 onClick={() => {
@@ -636,7 +865,7 @@ export default function Home() {
               >
                 <Icon name="send" size={15} /> Broadcast alert
               </button>}
-              <button className="outline-button" onClick={() => { localStorage.removeItem("waypoint-token"); setToken(""); setAuthUser(null); }} aria-label="Sign out">Sign out</button>
+              <button className="outline-button" onClick={handleSignOut} aria-label="Sign out">Sign out</button>
             </div>
           </section>
 
@@ -649,13 +878,13 @@ export default function Home() {
               <div className="quick-actions-bar">
                 {(role === "School admin" || role === "Parent") && <button
                   className="action-primary-btn"
-                  onClick={() => setShowAddStudentModal(true)}
+                  onClick={() => { setEditingStudent(null); setShowAddStudentModal(true); }}
                 >
                   <Icon name="plus" size={15} /> Add Student
                 </button>}
                 {role === "School admin" && <button
                   className="action-secondary-btn"
-                  onClick={() => setShowAddRouteModal(true)}
+                  onClick={() => { setEditingRoute(null); setShowAddRouteModal(true); }}
                 >
                   <Icon name="route" size={15} /> Create Route
                 </button>}
@@ -668,7 +897,7 @@ export default function Home() {
                 <button
                   className="action-secondary-btn"
                   onClick={() => {
-                    setSelectedRouteId("RTE-008");
+                    setSelectedRouteId(routes[0]?.id || "");
                     setActiveTab("live");
                   }}
                 >
@@ -684,7 +913,7 @@ export default function Home() {
                     <span className="stat-icon lilac"><Icon name="route" size={17} /></span>
                   </div>
                   <div className="stat-value">
-                    {activeRoutesCount} <small>/ {routes.length || 4}</small>
+                    {activeRoutesCount} <small>/ {routes.length}</small>
                   </div>
                   <div className="stat-foot">
                     <span className="mini-bars"><i /><i /><i /><i /><i /><i /><i /></span>
@@ -883,7 +1112,7 @@ export default function Home() {
                           <strong>{item.title}</strong>
                           <span>{item.detail}</span>
                         </div>
-                        <time>{item.time}</time>
+                        <time dateTime={item.createdAt} suppressHydrationWarning>{formatNotificationAge(item.createdAt, item.time, currentDateTime)}</time>
                       </div>
                     ))}
                   </div>
@@ -949,10 +1178,10 @@ export default function Home() {
                     </span>
                     <div>
                       <strong style={{ fontSize: 13, display: "block", color: "#1e3a8a", marginBottom: 2 }}>
-                        Parent Live Portal · Tracking Ishaan Kapoor
+                        Parent Live Portal · {parentStudent ? `Tracking ${parentStudent.name}` : "No student registered"}
                       </strong>
                       <span style={{ fontSize: 12, color: "#475569" }}>
-                        Assigned to {currentRoute.number} · Pickup at Rosewood Society (Stop 03) · Bus ETA: 7:48 AM
+                        {parentStudent ? `Assigned to ${routes.find((route) => route.id === parentStudent.routeId)?.number || parentStudent.routeId} · Pickup at ${parentStudent.stopName} · Status: ${parentStudent.status}` : "Register your student to see route and pickup updates."}
                       </span>
                     </div>
                   </div>
@@ -960,21 +1189,20 @@ export default function Home() {
                     <button
                       className="action-btn-small"
                       style={{ padding: "8px 14px", fontSize: 12 }}
-                      onClick={() => flashNotice("Driver Amit Singh notified: Parent is waiting at pickup gate.")}
+                      onClick={() => parentStudent && handleNotifyDriver(parentStudent)}
+                      disabled={!parentStudent}
                     >
                       <Icon name="send" size={13} /> Notify Driver
                     </button>
-                    <button
+                    {parentStudent && <button
                       className="action-btn-small action-btn-absent"
                       style={{ padding: "8px 14px", fontSize: 12 }}
                       onClick={() => {
-                        const ishaan = students.find((s) => s.name === "Ishaan Kapoor");
-                        if (ishaan) handleStudentStatusChange(ishaan.id, "Absent");
-                        flashNotice("Marked Ishaan absent today. Driver manifest updated.");
+                        handleStudentStatusChange(parentStudent.id, "Absent");
                       }}
                     >
                       Child Absent Today
-                    </button>
+                    </button>}
                   </div>
                 </div>
               )}
@@ -1295,7 +1523,7 @@ export default function Home() {
                             <strong>{event.title}</strong>
                             <span>{event.detail}</span>
                           </div>
-                          <time>{event.time}</time>
+                          <time dateTime={event.createdAt} suppressHydrationWarning>{formatNotificationAge(event.createdAt, event.time, currentDateTime)}</time>
                         </div>
                       ))}
                     </div>
@@ -1425,7 +1653,7 @@ export default function Home() {
                 </button>}
                 {role === "School admin" && <button
                   className="action-secondary-btn"
-                  onClick={() => setShowAddRouteModal(true)}
+                  onClick={() => { setEditingRoute(null); setShowAddRouteModal(true); }}
                 >
                   <Icon name="route" size={15} /> Create New Route
                 </button>}
@@ -1470,6 +1698,10 @@ export default function Home() {
                   >
                     <i /> {currentRoute.status}
                   </span>
+                  {role === "School admin" && currentRoute.id && <div style={{ display: "flex", gap: 8 }}>
+                    <button className="action-btn-small" onClick={() => { setEditingRoute(currentRoute); setShowAddRouteModal(true); }}>Edit route</button>
+                    <button className="action-btn-small action-btn-absent" onClick={() => handleDeleteRoute(currentRoute)}>Delete route</button>
+                  </div>}
                 </div>
 
                 <div
@@ -1564,6 +1796,10 @@ export default function Home() {
                               <Icon name="check" size={11} /> Mark Picked Up
                             </button>
                           )}
+                          {role === "School admin" && <>
+                            <button className="action-btn-small" onClick={() => handleEditStop(stop)}>Edit</button>
+                            <button className="action-btn-small action-btn-absent" onClick={() => handleDeleteStop(stop)}>Remove</button>
+                          </>}
                         </div>
                       </div>
                     ))}
@@ -1673,7 +1909,7 @@ export default function Home() {
                   {(role === "School admin" || role === "Parent") && <button
                     className="action-primary-btn"
                     style={{ marginLeft: "auto" }}
-                    onClick={() => setShowAddStudentModal(true)}
+                    onClick={() => { setEditingStudent(null); setShowAddStudentModal(true); }}
                   >
                     <Icon name="plus" size={14} /> Add Student
                   </button>}
@@ -1755,7 +1991,7 @@ export default function Home() {
                             </td>
                             <td>
                               <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                                {st.status !== "Picked up" && (
+                                {role !== "Parent" && st.status !== "Picked up" && (
                                   <button
                                     className="action-btn-small action-btn-pickup"
                                     onClick={() => handleStudentStatusChange(st.id, "Picked up")}
@@ -1764,7 +2000,7 @@ export default function Home() {
                                     <Icon name="check" size={12} /> Picked up
                                   </button>
                                 )}
-                                {st.status !== "Absent" && (
+                                {role !== "Parent" && st.status !== "Absent" && (
                                   <button
                                     className="action-btn-small action-btn-absent"
                                     onClick={() => handleStudentStatusChange(st.id, "Absent")}
@@ -1780,6 +2016,10 @@ export default function Home() {
                                 >
                                   <Icon name="phone" size={13} />
                                 </button>
+                                {role === "School admin" && <>
+                                  <button className="action-btn-small" onClick={() => { setEditingStudent(st); setShowAddStudentModal(true); }} title="Edit student">Edit</button>
+                                  <button className="action-btn-small action-btn-absent" onClick={() => handleDeleteStudent(st)} title="Delete student">Delete</button>
+                                </>}
                               </div>
                             </td>
                           </tr>
@@ -1873,7 +2113,9 @@ export default function Home() {
                         <div className="notif-body">
                           <div className="notif-topline">
                             <span className="notif-title">{notif.title}</span>
-                            <span className="notif-time">{notif.time}</span>
+                            <time className="notif-time" dateTime={notif.createdAt} suppressHydrationWarning>
+                              {formatNotificationAge(notif.createdAt, notif.time, currentDateTime)}
+                            </time>
                           </div>
                           <p className="notif-message">{notif.message}</p>
                           <div className="notif-tags">
@@ -1890,6 +2132,11 @@ export default function Home() {
                                 onClick={() => handleMarkAllNotificationsRead(notif.id)}
                               >
                                 Mark read
+                              </button>
+                            )}
+                            {role === "School admin" && (
+                              <button className="action-btn-small action-btn-absent" onClick={() => handleDeleteNotification(notif.id)}>
+                                Delete
                               </button>
                             )}
                           </div>
@@ -2062,30 +2309,31 @@ export default function Home() {
       {/* MODAL 3: CREATE ROUTE */}
       {/* ============================================================== */}
       {showAddRouteModal && (
-        <div className="modal-backdrop" onClick={() => setShowAddRouteModal(false)}>
+        <div className="modal-backdrop" onClick={() => { setShowAddRouteModal(false); setEditingRoute(null); }}>
           <div
             className="delay-modal"
             role="dialog"
             aria-modal="true"
             onClick={(e) => e.stopPropagation()}
           >
-            <button className="modal-close" onClick={() => setShowAddRouteModal(false)} aria-label="Close">
+            <button className="modal-close" onClick={() => { setShowAddRouteModal(false); setEditingRoute(null); }} aria-label="Close">
               ×
             </button>
             <div className="modal-icon" style={{ background: "#edf2fa", color: "#5575cf" }}>
               <Icon name="route" size={21} />
             </div>
             <div className="section-kicker">FLEET MANAGEMENT</div>
-            <h2>Create New Route</h2>
-            <p>Configure a new bus route, campus destination, and assigned driver.</p>
+            <h2>{editingRoute ? "Edit Route" : "Create New Route"}</h2>
+            <p>Configure the route, campus destination, driver account, and vehicle assignment.</p>
 
-            <form onSubmit={handleAddRouteSubmit} className="form-grid">
+            <form key={editingRoute?.id || "new-route"} onSubmit={handleAddRouteSubmit} className="form-grid">
               <div className="form-row-2">
                 <div className="form-field">
                   <label className="form-label">Route Number / Code</label>
                   <input
                     name="number"
                     required
+                    defaultValue={editingRoute?.number || ""}
                     placeholder="e.g. Route 09"
                     className="form-input"
                   />
@@ -2095,18 +2343,27 @@ export default function Home() {
                   <input
                     name="campus"
                     required
+                    defaultValue={editingRoute?.campus || ""}
                     placeholder="e.g. West Campus"
                     className="form-input"
                   />
                 </div>
               </div>
 
+              <div className="form-field">
+                <label className="form-label">Assign driver account</label>
+                <select name="driverId" className="form-select" defaultValue={editingRoute?.driver.id || ""}>
+                  <option value="">Legacy driver details only</option>
+                  {drivers.filter((driver) => driver.isActive).map((driver) => <option key={driver.id} value={driver.id}>{driver.name} · {driver.email}</option>)}
+                </select>
+              </div>
+
               <div className="form-row-2">
                 <div className="form-field">
-                  <label className="form-label">Driver Name</label>
+                  <label className="form-label">Driver Name (if no account)</label>
                   <input
                     name="driverName"
-                    required
+                    defaultValue={editingRoute?.driver.name || ""}
                     placeholder="e.g. Mohan Lal"
                     className="form-input"
                   />
@@ -2115,6 +2372,7 @@ export default function Home() {
                   <label className="form-label">Driver Phone</label>
                   <input
                     name="driverPhone"
+                    defaultValue={editingRoute?.driver.phone || ""}
                     placeholder="+91 98765 12345"
                     className="form-input"
                   />
@@ -2127,31 +2385,36 @@ export default function Home() {
                   <input
                     name="vehicleReg"
                     required
+                    defaultValue={editingRoute?.vehicle.reg || ""}
                     placeholder="e.g. KA 05 MN 9922"
                     className="form-input"
                   />
                 </div>
                 <div className="form-field">
+                  <label className="form-label">Vehicle Model</label>
+                  <input name="vehicleModel" defaultValue={editingRoute?.vehicle.model || "School bus"} className="form-input" />
+                </div>
+              </div>
+              <div className="form-field">
                   <label className="form-label">Seating Capacity</label>
                   <input
                     name="capacity"
                     type="number"
-                    defaultValue={32}
+                    defaultValue={editingRoute?.vehicle.capacity || 32}
                     className="form-input"
                   />
-                </div>
               </div>
 
               <div className="form-actions">
                 <button
                   type="button"
                   className="action-secondary-btn"
-                  onClick={() => setShowAddRouteModal(false)}
+                  onClick={() => { setShowAddRouteModal(false); setEditingRoute(null); }}
                 >
                   Cancel
                 </button>
                 <button type="submit" className="action-primary-btn">
-                  Create Route
+                  {editingRoute ? "Save Route" : "Create Route"}
                 </button>
               </div>
             </form>
@@ -2163,30 +2426,31 @@ export default function Home() {
       {/* MODAL 4: ADD STUDENT */}
       {/* ============================================================== */}
       {showAddStudentModal && (
-        <div className="modal-backdrop" onClick={() => setShowAddStudentModal(false)}>
+        <div className="modal-backdrop" onClick={() => { setShowAddStudentModal(false); setEditingStudent(null); }}>
           <div
             className="delay-modal"
             role="dialog"
             aria-modal="true"
             onClick={(e) => e.stopPropagation()}
           >
-            <button className="modal-close" onClick={() => setShowAddStudentModal(false)} aria-label="Close">
+            <button className="modal-close" onClick={() => { setShowAddStudentModal(false); setEditingStudent(null); }} aria-label="Close">
               ×
             </button>
             <div className="modal-icon" style={{ background: "#faf4e8", color: "#b99451" }}>
               <Icon name="users" size={21} />
             </div>
             <div className="section-kicker">STUDENT REGISTRATION</div>
-            <h2>Register New Student</h2>
-            <p>Assign a student to a daily school transport route and stop.</p>
+            <h2>{editingStudent ? "Edit Student" : "Register New Student"}</h2>
+            <p>Save student, guardian, and route details to the school database.</p>
 
-            <form onSubmit={handleAddStudentSubmit} className="form-grid">
+            <form key={editingStudent?.id || "new-student"} onSubmit={handleAddStudentSubmit} className="form-grid">
               <div className="form-row-2">
                 <div className="form-field">
                   <label className="form-label">Student Full Name</label>
                   <input
                     name="name"
                     required
+                    defaultValue={editingStudent?.name || ""}
                     placeholder="e.g. Riyaan Sen"
                     className="form-input"
                   />
@@ -2196,6 +2460,7 @@ export default function Home() {
                   <input
                     name="grade"
                     required
+                    defaultValue={editingStudent?.grade || ""}
                     placeholder="e.g. Grade 4-A"
                     className="form-input"
                   />
@@ -2205,7 +2470,7 @@ export default function Home() {
               <div className="form-row-2">
                 <div className="form-field">
                   <label className="form-label">Assigned Route</label>
-                  <select name="routeId" className="form-select" required defaultValue={selectedRouteId}>
+                  <select name="routeId" className="form-select" required defaultValue={editingStudent?.routeId || selectedRouteId}>
                     {routes.map((r) => (
                       <option key={r.id} value={r.id}>{r.number} ({r.campus})</option>
                     ))}
@@ -2216,6 +2481,7 @@ export default function Home() {
                   <input
                     name="stopName"
                     required
+                    defaultValue={editingStudent?.stopName || ""}
                     placeholder="e.g. Rosewood Society"
                     className="form-input"
                   />
@@ -2228,6 +2494,7 @@ export default function Home() {
                   <input
                     name="guardianName"
                     required
+                    defaultValue={editingStudent?.guardian.name || ""}
                     placeholder="e.g. Shweta Sen"
                     className="form-input"
                   />
@@ -2237,16 +2504,23 @@ export default function Home() {
                   <input
                     name="guardianPhone"
                     required
+                    defaultValue={editingStudent?.guardian.phone || ""}
                     placeholder="+91 98765 00112"
                     className="form-input"
                   />
                 </div>
               </div>
 
+              <div className="form-row-2">
+                <div className="form-field"><label className="form-label">Guardian relation</label><input name="guardianRelation" defaultValue={editingStudent?.guardian.relation || "Parent"} className="form-input" /></div>
+                <div className="form-field"><label className="form-label">Emergency contact</label><input name="emergencyContact" defaultValue={editingStudent?.emergencyContact || ""} className="form-input" /></div>
+              </div>
+
               <div className="form-field">
                 <label className="form-label">Special Notes (Optional)</label>
                 <input
                   name="notes"
+                  defaultValue={editingStudent?.notes || ""}
                   placeholder="e.g. Assisted boarding required"
                   className="form-input"
                 />
@@ -2256,12 +2530,12 @@ export default function Home() {
                 <button
                   type="button"
                   className="action-secondary-btn"
-                  onClick={() => setShowAddStudentModal(false)}
+                  onClick={() => { setShowAddStudentModal(false); setEditingStudent(null); }}
                 >
                   Cancel
                 </button>
                 <button type="submit" className="action-primary-btn">
-                  Register Student
+                  {editingStudent ? "Save Student" : "Register Student"}
                 </button>
               </div>
             </form>
@@ -2355,6 +2629,71 @@ export default function Home() {
                   Dispatch Broadcast
                 </button>
               </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {showDriversModal && (
+        <div className="modal-backdrop" onClick={() => { setShowDriversModal(false); setEditingDriver(null); }}>
+          <div className="delay-modal drivers-modal" role="dialog" aria-modal="true" aria-labelledby="drivers-title" onClick={(e) => e.stopPropagation()}>
+            <button className="modal-close" onClick={() => { setShowDriversModal(false); setEditingDriver(null); }} aria-label="Close">×</button>
+            <div className="section-kicker">SCHOOL ADMINISTRATION</div>
+            <h2 id="drivers-title">Manage driver accounts</h2>
+            <p>Each driver signs in with an individual account. Deactivation keeps their route history.</p>
+            {driverFormError && <p role="alert" style={{ color: "#be123c", margin: "8px 0" }}>{driverFormError}</p>}
+            {driverFormSuccess && <p role="status" style={{ color: "#047857", margin: "8px 0" }}>{driverFormSuccess}</p>}
+            <div className="table-container" style={{ margin: "16px 0" }}>
+              <div className="table-responsive">
+                <table className="data-table">
+                  <thead><tr><th>Driver</th><th>Assigned route</th><th>Account</th><th>Actions</th></tr></thead>
+                  <tbody>
+                    {drivers.length ? drivers.map((driver) => (
+                      <tr key={driver.id}>
+                        <td><strong>{driver.name}</strong><br /><span style={{ fontSize: 11 }}>{driver.email}</span></td>
+                        <td>{driver.routes.map((route) => route.number).join(", ") || "Unassigned"}</td>
+                        <td>{driver.isActive ? "Active" : "Inactive"}</td>
+                        <td style={{ whiteSpace: "nowrap" }}>
+                          <button type="button" className="action-btn-small" onClick={() => { setDriverFormError(""); setDriverFormSuccess(""); setEditingDriver(driver); }}>Edit</button>{" "}
+                          {driver.isActive
+                            ? <button type="button" className="action-btn-small action-btn-absent" onClick={() => handleDeactivateDriver(driver)}>Deactivate</button>
+                            : <button type="button" className="action-btn-small action-btn-pickup" onClick={() => handleReactivateDriver(driver)}>Reactivate</button>}
+                        </td>
+                      </tr>
+                    )) : <tr><td colSpan={4} style={{ textAlign: "center" }}>No driver accounts yet.</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <h3 style={{ fontSize: 15 }}>{editingDriver ? `Edit ${editingDriver.name}` : "Create driver account"}</h3>
+            <form key={editingDriver?.id || "new-driver"} onSubmit={handleDriverSubmit} className="form-grid">
+              <div className="form-row-2">
+                <div className="form-field"><label className="form-label">Full name</label><input name="name" required defaultValue={editingDriver?.name || ""} className="form-input" /></div>
+                <div className="form-field"><label className="form-label">Email</label><input name="email" type="email" required defaultValue={editingDriver?.email || ""} className="form-input" autoComplete="username" /></div>
+              </div>
+              <div className="form-row-2">
+                <div className="form-field"><label className="form-label">{editingDriver ? "New password (optional)" : "Password"}</label><input name="password" type="password" required={!editingDriver} minLength={10} maxLength={200} className="form-input" autoComplete="new-password" /><small>Use 10–200 characters. The driver signs in with this email and password.</small></div>
+                <div className="form-field"><label className="form-label">Assigned route</label><select name="routeId" className="form-select" defaultValue={editingDriver?.routes[0]?.id || ""}><option value="">Unassigned</option>{routes.map((route) => <option key={route.id} value={route.id}>{route.number} · {route.campus}</option>)}</select></div>
+              </div>
+              <label className="form-label" style={{ display: "flex", gap: 8, alignItems: "center" }}><input name="isActive" type="checkbox" defaultChecked={editingDriver?.isActive ?? true} /> Account is active</label>
+              <div className="form-actions">
+                <button type="button" className="action-secondary-btn" onClick={() => { setEditingDriver(null); setDriverFormError(""); setDriverFormSuccess(""); }}>Clear form</button>
+                <button type="submit" className="action-primary-btn" disabled={pendingRequests > 0} aria-busy={pendingRequests > 0}>{pendingRequests > 0 ? "Saving…" : editingDriver ? "Save changes" : "Create driver"}</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {showProfileModal && authUser && (
+        <div className="modal-backdrop" onClick={() => setShowProfileModal(false)}>
+          <div className="delay-modal" role="dialog" aria-modal="true" aria-labelledby="profile-title" onClick={(e) => e.stopPropagation()}>
+            <button className="modal-close" onClick={() => setShowProfileModal(false)} aria-label="Close">×</button>
+            <div className="section-kicker">ACCOUNT SETTINGS</div><h2 id="profile-title">Edit profile</h2>
+            <form onSubmit={handleProfileSubmit} className="form-grid">
+              <div className="form-field"><label className="form-label">Full name</label><input name="name" required defaultValue={authUser.name} className="form-input" autoComplete="name" /></div>
+              <div className="form-field"><label className="form-label">Email</label><input name="email" type="email" required defaultValue={authUser.email} className="form-input" autoComplete="email" /></div>
+              <div className="form-actions"><button type="button" className="action-secondary-btn" onClick={() => setShowProfileModal(false)}>Cancel</button><button type="submit" className="action-primary-btn">Save profile</button></div>
             </form>
           </div>
         </div>

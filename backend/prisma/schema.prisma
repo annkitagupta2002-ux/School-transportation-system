@@ -14,27 +14,68 @@ enum UserRole {
 }
 
 model User {
-  id           String   @id @default(cuid())
-  email        String   @unique
-  passwordHash String
-  name         String
-  role         UserRole
-  students     Student[]
-  createdAt    DateTime @default(now())
+  id                String             @id @default(cuid())
+  email             String             @unique
+  passwordHash      String
+  name              String
+  role              UserRole
+  isActive          Boolean            @default(true)
+  students          Student[]
+  driverRoutes      Route[]            @relation("DriverRoutes")
+  notificationReads NotificationRead[]
+  schoolAdminConfig SchoolAdminConfig?
+  createdAt         DateTime           @default(now())
 }
 
 model Route {
-  id               String   @id
+  id               String      @id
   number           String
   campus           String
   status           String
   driver           Json
   vehicle          Json
   eta              String
-  currentStopIndex Int      @default(0)
+  currentStopIndex Int         @default(0)
   stops            Json
+  driverId         String?
+  assignedDriver   User?       @relation("DriverRoutes", fields: [driverId], references: [id], onDelete: SetNull)
+  vehicleId        String?
+  assignedVehicle  Vehicle?    @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
+  routeStops       RouteStop[]
+  students         Student[]   @relation("StudentRoute")
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+
+  @@index([driverId])
+  @@index([vehicleId])
+}
+
+model Vehicle {
+  id               String   @id @default(cuid())
+  registration     String   @unique
+  model            String
+  capacity         Int
+  inspectionStatus String   @default("Pending")
+  routes           Route[]
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
+}
+
+model RouteStop {
+  id          String   @id @default(cuid())
+  routeId     String
+  route       Route    @relation(fields: [routeId], references: [id], onDelete: Cascade)
+  legacyId    String?
+  name        String
+  area        String
+  time        String
+  status      String   @default("upcoming")
+  studentName String?
+  position    Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  @@unique([routeId, legacyId])
+  @@index([routeId, position])
 }
 
 model Student {
@@ -42,6 +83,7 @@ model Student {
   name             String
   grade            String
   routeId          String
+  route            Route    @relation("StudentRoute", fields: [routeId], references: [id], onDelete: Restrict)
   stopName         String
   status           String
   pickupTime       String?
@@ -51,27 +93,49 @@ model Student {
   parentUserId     String?
   parent           User?    @relation(fields: [parentUserId], references: [id])
   createdAt        DateTime @default(now())
+
+  @@index([routeId])
+  @@index([parentUserId])
 }
 
 model Notification {
-  id        String   @id
+  id        String             @id
   title     String
   message   String
   category  String
   routeId   String?
   audience  String
   time      String
-  read      Boolean  @default(false)
+  read      Boolean            @default(false)
   tone      String
-  createdAt DateTime @default(now())
+  reads     NotificationRead[]
+  createdAt DateTime           @default(now())
+}
+
+model NotificationRead {
+  userId         String
+  notificationId String
+  readAt         DateTime     @default(now())
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  notification   Notification @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+
+  @@id([userId, notificationId])
+}
+
+model SchoolAdminConfig {
+  id        String   @id @default("school")
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+  updatedAt DateTime @updatedAt
 }
 
 model Activity {
-  id      String @id
-  icon    String
-  title   String
-  detail  String
-  time    String
-  tone    String
-  routeId String?
+  id        String    @id
+  icon      String
+  title     String
+  detail    String
+  time      String
+  tone      String
+  routeId   String?
+  createdAt DateTime?
 }

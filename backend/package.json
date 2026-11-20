@@ -7,7 +7,9 @@
     "start": "tsx server/index.ts",
     "build": "prisma generate --schema prisma/schema.prisma",
     "postinstall": "prisma generate --schema prisma/schema.prisma",
-    "db:seed": "tsx prisma/seed.ts"
+    "db:seed": "tsx prisma/seed.ts",
+    "db:backfill": "tsx prisma/backfill-relations.ts",
+    "test:integration": "tsx prisma/integration-smoke.ts"
   },
   "dependencies": {
     "@prisma/client": "6.19.0",
