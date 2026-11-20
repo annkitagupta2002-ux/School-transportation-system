@@ -1,42 +1,21 @@
-# Waypoint
+# Waypoint school transport
 
-Waypoint is a school transportation coordination app for school staff, bus drivers, and families. It brings route progress, student boarding updates, and transport alerts together in one dashboard.
+The repository is organized into two application folders:
 
-## What Waypoint does
+- `frontend/` contains the Next.js UI, styles, and static assets.
+- `backend/` contains the Express API, Prisma schema and seed, Prisma client, and local environment file.
 
-- **Monitor operations:** View route activity, student boarding counts, delays, and fleet status from the overview.
-- **Track routes:** Follow route and stop progress, view estimated arrival times, and switch between routes.
-- **Coordinate drivers and families:** Update trip status, report delays, record student pickups, and progress a route through its stops.
-- **Manage transport details:** Create routes, add stops, and register students with their route, pickup stop, and guardian contact.
-- **Send notifications:** Broadcast delay alerts and school transport announcements, then review and mark notifications as read.
-- **Use role-based views:** Switch between School Admin, Driver, and Parent perspectives to see relevant transport information and actions.
+The root contains shared npm tooling and scripts.
 
-## Run Waypoint locally
+## Setup
 
-### Requirements
+1. Install dependencies at the repository root with `npm install`.
+2. Configure `backend/.env` with `DATABASE_URL`, `JWT_SECRET`, `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `DRIVER_EMAIL`, and `DRIVER_PASSWORD`.
+3. Run `npm run db:generate`, `npm run db:push`, and `npm run db:seed`.
+4. Start both applications with `npm run dev`.
 
-- Node.js 18 or later
-- npm
+The frontend runs at [http://localhost:3000](http://localhost:3000); the Express API runs on port 4001. The frontend proxies `/api/*` to Express.
 
-### Start the app
+School admins can add students, create routes and stops, and broadcast announcements. Drivers can view transport data and update trip status. Parents can register and submit student information; their list is scoped to records submitted by their account.
 
-From the project directory, run:
-
-```bash
-npm install
-npm run dev
-```
-
-Open [http://localhost:3000](http://localhost:3000).
-
-## Data and API
-
-Waypoint is built with Next.js and React. Its API routes provide operations for routes, students, and notifications under `/api`. The current data store is held in memory for the running server session; it is intended for demonstration and resets when the server restarts.
-
-## Try the main workflow
-
-1. Open **Overview** to review route and boarding activity.
-2. Open **Live routes** and select a route to view its stops and trip status.
-3. Record a pickup or advance the route to simulate progress.
-4. Use **Stops & routes** or **Students** to add transport details.
-5. Open **Notifications** to review alerts or send an announcement.
+Never commit the real `.env` file or put database credentials in frontend code. `.env.example` is a safe template.

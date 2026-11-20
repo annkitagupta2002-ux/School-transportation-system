@@ -115,6 +115,11 @@ function Icon({ name, size = 18 }: { name: string; size?: number }) {
 export default function Home() {
   const [activeTab, setActiveTab] = useState<Tab>("overview");
   const [role, setRole] = useState("School admin");
+  const [token, setToken] = useState("");
+  const [authChecking, setAuthChecking] = useState(true);
+  const [authUser, setAuthUser] = useState<{ id: string; name: string; role: string } | null>(null);
+  const [authError, setAuthError] = useState("");
+  const [registerParent, setRegisterParent] = useState(false);
   const [selectedRouteId, setSelectedRouteId] = useState("RTE-008");
   const [routes, setRoutes] = useState<RouteItem[]>([]);
   const [students, setStudents] = useState<Student[]>([]);
@@ -122,6 +127,37 @@ export default function Home() {
   const [activity, setActivity] = useState<ActivityEvent[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [notice, setNotice] = useState("");
+
+  useEffect(() => {
+    const saved = localStorage.getItem("waypoint-token");
+    if (saved) {
+      fetch("/api/auth/me", { headers: { Authorization: `Bearer ${saved}` } })
+        .then((r) => r.ok ? r.json() : Promise.reject())
+        .then((data) => { setToken(saved); setAuthUser(data.user); setRole(data.user.role === "SCHOOL_ADMIN" ? "School admin" : data.user.role === "DRIVER" ? "Driver" : "Parent"); })
+        .catch(() => { localStorage.removeItem("waypoint-token"); setToken(""); })
+        .finally(() => setAuthChecking(false));
+    } else queueMicrotask(() => setAuthChecking(false));
+  }, []);
+
+  const apiFetch = useCallback(async (input: RequestInfo | URL, init: RequestInit = {}) => {
+    const headers = new Headers(init.headers);
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+    return fetch(input, { ...init, headers });
+  }, [token]);
+
+  async function handleAuthSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault(); setAuthError("");
+    const values = Object.fromEntries(new FormData(e.currentTarget).entries());
+    const endpoint = registerParent ? "/api/auth/register-parent" : "/api/auth/login";
+    try {
+      const response = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Could not sign in.");
+      localStorage.setItem("waypoint-token", data.token); setToken(data.token); setAuthUser(data.user);
+      setRole(data.user.role === "SCHOOL_ADMIN" ? "School admin" : data.user.role === "DRIVER" ? "Driver" : "Parent");
+    } catch (err) { setAuthError(err instanceof Error ? err.message : "Could not sign in."); }
+  }
 
   // Modals state
   const [showDelayModal, setShowDelayModal] = useState(false);
@@ -140,7 +176,7 @@ export default function Home() {
   // Load all initial data from backend API
   const loadData = useCallback(async () => {
     try {
-      const res = await fetch(`/api/route?routeId=${selectedRouteId}`);
+      const res = await apiFetch(`/api/route?routeId=${selectedRouteId}`);
       if (!res.ok) throw new Error("Could not load transportation data.");
       const data = await res.json();
       if (Array.isArray(data.routes)) setRoutes(data.routes);
@@ -154,11 +190,12 @@ export default function Home() {
       console.error(err);
       setNotice(err instanceof Error ? err.message : "Error connecting to transport service.");
     }
-  }, [selectedRouteId]);
+  }, [selectedRouteId, apiFetch]);
 
   useEffect(() => {
     let isMounted = true;
-    fetch(`/api/route?routeId=${selectedRouteId}`)
+    if (!token) return;
+    apiFetch(`/api/route?routeId=${selectedRouteId}`)
       .then((res) => res.json())
       .then((data) => {
         if (!isMounted) return;
@@ -178,7 +215,7 @@ export default function Home() {
     return () => {
       isMounted = false;
     };
-  }, [selectedRouteId]);
+  }, [selectedRouteId, token, apiFetch]);
 
   const currentRoute = routes.find((r) => r.id === selectedRouteId) || routes[0] || {
     id: "RTE-008",
@@ -201,7 +238,7 @@ export default function Home() {
   // Action: update route status
   async function handleUpdateStatus(next: RouteStatus, reason?: string, delayMinutes?: string) {
     try {
-      const res = await fetch("/api/route", {
+      const res = await apiFetch("/api/route", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -224,7 +261,7 @@ export default function Home() {
   // Action: Mark student picked up
   async function handleMarkPickedUp(studentName: string) {
     try {
-      const res = await fetch("/api/route", {
+      const res = await apiFetch("/api/route", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -244,7 +281,7 @@ export default function Home() {
   // Action: Update student status (e.g. Absent / Dropped off)
   async function handleStudentStatusChange(studentId: string, status: StudentStatus) {
     try {
-      const res = await fetch("/api/students", {
+      const res = await apiFetch("/api/students", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ studentId, status }),
@@ -261,7 +298,7 @@ export default function Home() {
   // Action: Simulate advance route to next stop
   async function handleAdvanceStop(routeId: string) {
     try {
-      const res = await fetch("/api/route", {
+      const res = await apiFetch("/api/route", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ routeId, action: "advance_stop" }),
@@ -278,7 +315,7 @@ export default function Home() {
   // Action: Mark all notifications read
   async function handleMarkAllNotificationsRead(id?: string) {
     try {
-      const res = await fetch("/api/notifications", {
+      const res = await apiFetch("/api/notifications", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "mark_read", id }),
@@ -307,7 +344,7 @@ export default function Home() {
     };
 
     try {
-      const res = await fetch("/api/routes", {
+      const res = await apiFetch("/api/routes", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -338,7 +375,7 @@ export default function Home() {
     };
 
     try {
-      const res = await fetch("/api/routes", {
+      const res = await apiFetch("/api/routes", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -372,7 +409,7 @@ export default function Home() {
     };
 
     try {
-      const res = await fetch("/api/students", {
+      const res = await apiFetch("/api/students", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -402,7 +439,7 @@ export default function Home() {
     };
 
     try {
-      const res = await fetch("/api/notifications", {
+      const res = await apiFetch("/api/notifications", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -442,6 +479,28 @@ export default function Home() {
   const waitingCount = students.filter((s) => s.status === "Waiting").length;
   const activeRoutesCount = routes.filter((r) => r.status === "On the way" || r.status === "At stop").length;
   const attentionRoutesCount = routes.filter((r) => r.status === "Delayed").length;
+
+  if (authChecking) return <main className="app-shell" style={{ minHeight: "100vh", display: "grid", placeItems: "center" }}>Loading Waypoint…</main>;
+  if (!token || !authUser) {
+    return (
+      <main className="app-shell" style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: 20 }}>
+        <form onSubmit={handleAuthSubmit} className="delay-modal" style={{ width: "min(100%, 420px)" }}>
+          <div className="brand-mark" style={{ marginBottom: 18 }}><Icon name="route" size={22} /></div>
+          <div className="section-kicker">WAYPOINT · SCHOOL TRANSPORT</div>
+          <h2>{registerParent ? "Create parent account" : "Sign in to Waypoint"}</h2>
+          <p>{registerParent ? "Register to submit your student’s transport details." : "Use your school or driver account to continue."}</p>
+          {registerParent && <div className="form-field"><label className="form-label">Full name</label><input name="name" required className="form-input" autoComplete="name" /></div>}
+          <div className="form-field" style={{ marginBottom: 12 }}><label className="form-label">Email</label><input name="email" type="email" required className="form-input" autoComplete="username" /></div>
+          <div className="form-field"><label className="form-label">Password</label><input name="password" type="password" required minLength={registerParent ? 10 : undefined} className="form-input" autoComplete={registerParent ? "new-password" : "current-password"} /></div>
+          {authError && <p role="alert" style={{ color: "#be123c", margin: "12px 0 0" }}>{authError}</p>}
+          <button className="action-primary-btn" style={{ width: "100%", justifyContent: "center", marginTop: 18 }}>{registerParent ? "Create parent account" : "Sign in"}</button>
+          <button type="button" className="action-secondary-btn" style={{ width: "100%", justifyContent: "center", marginTop: 10 }} onClick={() => { setRegisterParent(!registerParent); setAuthError(""); }}>
+            {registerParent ? "Back to sign in" : "Register as a parent"}
+          </button>
+        </form>
+      </main>
+    );
+  }
 
   return (
     <div className="app-shell">
@@ -535,7 +594,7 @@ export default function Home() {
             </strong>
           </div>
           <div className="top-actions">
-            <span className="today-label">Wednesday, 19 November</span>
+            <span className="today-label">Friday, 20 November</span>
             <button
               className="top-icon"
               aria-label="Notifications"
@@ -568,23 +627,16 @@ export default function Home() {
               </p>
             </div>
             <div className="heading-actions">
-              <label className="role-switch">
-                Viewing as{" "}
-                <select value={role} onChange={(e) => setRole(e.target.value)} aria-label="Choose your view">
-                  <option>School admin</option>
-                  <option>Driver</option>
-                  <option>Parent</option>
-                </select>
-                <span>⌄</span>
-              </label>
-              <button
+              <span className="role-switch">{authUser.name} · {role}</span>
+              {role === "School admin" && <button
                 className="outline-button"
                 onClick={() => {
                   setShowBroadcastModal(true);
                 }}
               >
                 <Icon name="send" size={15} /> Broadcast alert
-              </button>
+              </button>}
+              <button className="outline-button" onClick={() => { localStorage.removeItem("waypoint-token"); setToken(""); setAuthUser(null); }} aria-label="Sign out">Sign out</button>
             </div>
           </section>
 
@@ -595,24 +647,24 @@ export default function Home() {
             <div>
               {/* Quick Action Buttons */}
               <div className="quick-actions-bar">
-                <button
+                {(role === "School admin" || role === "Parent") && <button
                   className="action-primary-btn"
                   onClick={() => setShowAddStudentModal(true)}
                 >
                   <Icon name="plus" size={15} /> Add Student
-                </button>
-                <button
+                </button>}
+                {role === "School admin" && <button
                   className="action-secondary-btn"
                   onClick={() => setShowAddRouteModal(true)}
                 >
                   <Icon name="route" size={15} /> Create Route
-                </button>
-                <button
+                </button>}
+                {role === "School admin" && <button
                   className="action-secondary-btn"
                   onClick={() => setShowBroadcastModal(true)}
                 >
                   <Icon name="bell" size={15} /> Send Announcement
-                </button>
+                </button>}
                 <button
                   className="action-secondary-btn"
                   onClick={() => {
@@ -1019,14 +1071,14 @@ export default function Home() {
                           <p>{currentRoute.campus} · {currentRoute.id}</p>
                         </div>
                       </div>
-                      <button
+                      {role === "School admin" && <button
                         className="icon-button route-more"
                         aria-label="Route options"
                         onClick={() => setShowAddStopModal(true)}
                         title="Add stop"
                       >
                         <Icon name="plus" size={18} />
-                      </button>
+                      </button>}
                     </div>
 
                     <div className="route-meta">
@@ -1262,13 +1314,13 @@ export default function Home() {
                         <div className="section-kicker">{currentRoute.number} · TODAY</div>
                         <h2>Today’s stops</h2>
                       </div>
-                      <button
+                      {role === "School admin" && <button
                         className="small-select"
                         onClick={() => setShowAddStopModal(true)}
                         title="Add stop to route"
                       >
                         + Add stop
-                      </button>
+                      </button>}
                     </div>
 
                     <div className="stop-list">
@@ -1365,18 +1417,18 @@ export default function Home() {
             <div>
               {/* Quick Actions Bar */}
               <div className="quick-actions-bar">
-                <button
+                {role === "School admin" && <button
                   className="action-primary-btn"
                   onClick={() => setShowAddStopModal(true)}
                 >
                   <Icon name="plus" size={15} /> Add Stop to Route
-                </button>
-                <button
+                </button>}
+                {role === "School admin" && <button
                   className="action-secondary-btn"
                   onClick={() => setShowAddRouteModal(true)}
                 >
                   <Icon name="route" size={15} /> Create New Route
-                </button>
+                </button>}
                 <button
                   className="action-secondary-btn"
                   onClick={() => handleAdvanceStop(selectedRouteId)}
@@ -1468,12 +1520,12 @@ export default function Home() {
                     <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: "var(--text-main)" }}>
                       Stop Sequence & Scheduled Timings
                     </h3>
-                    <button
+                    {role === "School admin" && <button
                       className="small-select"
                       onClick={() => setShowAddStopModal(true)}
                     >
                       + Add new stop
-                    </button>
+                    </button>}
                   </div>
 
                   <div className="stops-sequencer">
@@ -1618,13 +1670,13 @@ export default function Home() {
                     Absent
                   </button>
 
-                  <button
+                  {(role === "School admin" || role === "Parent") && <button
                     className="action-primary-btn"
                     style={{ marginLeft: "auto" }}
                     onClick={() => setShowAddStudentModal(true)}
                   >
                     <Icon name="plus" size={14} /> Add Student
-                  </button>
+                  </button>}
                 </div>
               </div>
 
@@ -1762,12 +1814,12 @@ export default function Home() {
                     >
                       <Icon name="check" size={14} /> Mark all read
                     </button>
-                    <button
+                    {role === "School admin" && <button
                       className="action-primary-btn"
                       onClick={() => setShowBroadcastModal(true)}
                     >
                       <Icon name="send" size={14} /> New Broadcast
-                    </button>
+                    </button>}
                   </div>
                 </div>
 

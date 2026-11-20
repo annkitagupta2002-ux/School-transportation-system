@@ -1,0 +1,77 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  SCHOOL_ADMIN
+  DRIVER
+  PARENT
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         UserRole
+  students     Student[]
+  createdAt    DateTime @default(now())
+}
+
+model Route {
+  id               String   @id
+  number           String
+  campus           String
+  status           String
+  driver           Json
+  vehicle          Json
+  eta              String
+  currentStopIndex Int      @default(0)
+  stops            Json
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+model Student {
+  id               String   @id
+  name             String
+  grade            String
+  routeId          String
+  stopName         String
+  status           String
+  pickupTime       String?
+  guardian         Json
+  emergencyContact String
+  notes            String?
+  parentUserId     String?
+  parent           User?    @relation(fields: [parentUserId], references: [id])
+  createdAt        DateTime @default(now())
+}
+
+model Notification {
+  id        String   @id
+  title     String
+  message   String
+  category  String
+  routeId   String?
+  audience  String
+  time      String
+  read      Boolean  @default(false)
+  tone      String
+  createdAt DateTime @default(now())
+}
+
+model Activity {
+  id      String @id
+  icon    String
+  title   String
+  detail  String
+  time    String
+  tone    String
+  routeId String?
+}
