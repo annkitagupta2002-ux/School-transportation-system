@@ -50,6 +50,7 @@ body {
   font-size: 14px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
 }
 
 button, select, input, textarea {
@@ -350,6 +351,7 @@ button {
 .main-area {
   margin-left: 256px;
   flex: 1;
+  min-width: 0;
   min-height: 100vh;
   display: flex;
   flex-direction: column;
@@ -562,6 +564,8 @@ button {
    ========================================================================== */
 .action-primary-btn {
   height: 38px;
+  min-width: max-content;
+  white-space: nowrap;
   background: var(--emerald-primary);
   color: #ffffff;
   border: 0;
@@ -582,6 +586,8 @@ button {
 
 .action-secondary-btn {
   height: 38px;
+  min-width: max-content;
+  white-space: nowrap;
   background: #ffffff;
   color: var(--text-main);
   border: 1px solid var(--border);
@@ -605,6 +611,7 @@ button {
   display: flex;
   align-items: center;
   gap: 10px;
+  width: 100%;
   margin-bottom: 22px;
   flex-wrap: wrap;
 }
@@ -787,6 +794,14 @@ button {
 .right-column {
   display: grid;
   gap: 20px;
+  min-width: 0;
+}
+
+.route-panel,
+.route-card,
+.panel {
+  min-width: 0;
+  width: 100%;
 }
 
 /* ==========================================================================
@@ -1796,7 +1811,9 @@ button {
 
 .table-responsive {
   width: 100%;
+  max-width: 100%;
   overflow-x: auto;
+  overscroll-behavior-inline: contain;
 }
 
 .data-table {
@@ -2337,6 +2354,8 @@ button {
   .main-area { margin-left: 220px; }
   .page-content { padding: 24px 20px; }
   .topbar { padding: 0 20px; }
+  .quick-actions-bar { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .quick-actions-bar button { width: 100%; justify-content: center; }
   .content-grid { grid-template-columns: 1fr; }
   .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
@@ -2361,6 +2380,32 @@ button {
     height: 16px;
     font-size: 9px;
   }
-  .main-area { margin-left: 68px; }
+  .main-area { margin-left: 68px; width: calc(100% - 68px); min-width: 0; }
+  .page-content { padding: 20px 12px 32px; }
+  .topbar { padding: 0 12px; }
+  .today-label { display: none; }
+  .page-heading { align-items: stretch; }
+  .heading-actions { width: 100%; }
+  .quick-actions-bar { grid-template-columns: 1fr; }
   .stats-grid { grid-template-columns: 1fr; }
+  .tab-strip { max-width: 100%; }
+  .tab-btn { flex: 0 0 auto; white-space: nowrap; }
+  .route-meta { grid-template-columns: 1fr; gap: 12px; }
+  .sequence-view-card { max-width: 100%; overflow: hidden; }
+  .sequence-flow { max-width: 100%; }
+  .sequence-header-row,
+  .sequence-live-banner,
+  .driver-toolbar {
+    flex-wrap: wrap;
+  }
+  .route-card-top,
+  .other-route-row,
+  .parent-preview {
+    min-width: 0;
+  }
+  .routes-grid { grid-template-columns: minmax(0, 1fr); }
+  .overview-route-card { width: 100%; min-width: 0; }
+  .orc-header { gap: 8px; }
+  .orc-meta { min-width: 0; }
+  .orc-body { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
